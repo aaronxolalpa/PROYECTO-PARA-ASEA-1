@@ -29,40 +29,104 @@ def obtener_guias_y_periodos(archivo):
 
 def configurar_navegador(descargas_dir):
     chrome_options = webdriver.ChromeOptions()
+    
+    # Configurar la carpeta de descargas directamente a la carpeta 'busquedas'
     prefs = {
+        "download.default_directory": descargas_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+        "printing.print_preview_sticky_settings.appState": '{"recentDestinations":[{"id":"Save as PDF","origin":"local","account":""}],"selectedDestinationId":"Save as PDF","version":2}',
+        "printing.default_destination_selection_rules": '{"kind":"local","name":"Save as PDF"}',
         "savefile.default_directory": descargas_dir,
         "savefile.prompt_for_download": False,
-        "printing.print_preview_sticky_settings.appState": '{"recentDestinations":[{"id":"Save as PDF","origin":"local","account":""}],"selectedDestinationId":"Save as PDF","version":2}',
-        "printing.default_destination_selection_rules": '{"kind":"local","name":"Save as PDF"}'
+        "profile.default_content_settings.popups": 0,
+        "profile.default_content_setting_values.automatic_downloads": 1
     }
     chrome_options.add_experimental_option("prefs", prefs)
     chrome_options.add_argument('--kiosk-printing')
+    chrome_options.add_argument('--disable-extensions')
+    chrome_options.add_argument('--disable-plugins')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=chrome_options)
 
 
-def renombrar_pdf(descargas_dir, guia_numero):
-    time.sleep(5)
-    for archivo in os.listdir(descargas_dir):
-        if archivo.endswith(".pdf") and "Seguimiento" in archivo:
-            origen = os.path.join(descargas_dir, archivo)
-            destino = os.path.join(descargas_dir, f"{guia_numero}.pdf")
-            os.rename(origen, destino)
+def esperar_descarga_y_renombrar(descargas_dir, guia_numero, timeout=30):
+    """Espera a que se complete la descarga y renombra el archivo"""
+    tiempo_inicial = time.time()
+    archivo_temporal = None
+    
+    while time.time() - tiempo_inicial < timeout:
+        archivos = os.listdir(descargas_dir)
+        
+        # Buscar archivos .crdownload (descarga en progreso)
+        archivos_descargando = [f for f in archivos if f.endswith('.crdownload')]
+        if archivos_descargando:
+            time.sleep(1)
+            continue
+        
+        # Buscar el archivo PDF recién descargado
+        archivos_pdf = [f for f in archivos if f.endswith('.pdf')]
+        
+        # Buscar archivos que contengan palabras clave del seguimiento
+        for archivo in archivos_pdf:
+            if any(palabra in archivo.lower() for palabra in ['seguimiento', 'tracking', 'sepomex', 'correos']):
+                # Verificar que no sea uno de nuestros archivos ya renombrados
+                if not archivo.replace('.pdf', '').isdigit():
+                    archivo_temporal = archivo
+                    break
+        
+        if archivo_temporal:
             break
+        
+        time.sleep(1)
+    
+    # Renombrar el archivo si se encontró
+    if archivo_temporal:
+        try:
+            origen = os.path.join(descargas_dir, archivo_temporal)
+            destino = os.path.join(descargas_dir, f"{guia_numero}.pdf")
+            
+            # Si ya existe un archivo con ese nombre, eliminarlo
+            if os.path.exists(destino):
+                os.remove(destino)
+            
+            os.rename(origen, destino)
+            print(f"Archivo renombrado: {archivo_temporal} -> {guia_numero}.pdf")
+            return True
+        except Exception as e:
+            print(f"Error al renombrar archivo para guía {guia_numero}: {e}")
+            return False
+    else:
+        print(f"No se pudo encontrar el archivo descargado para la guía {guia_numero}")
+        return False
 
 
 def procesar_guia(guia_numero, periodo, descargas_dir):
     driver = configurar_navegador(descargas_dir)
     url = 'https://www.correosdemexico.gob.mx/SSLServicios/SeguimientoEnvio/Seguimiento.aspx'
+    
     try:
         driver.get(url)
-        driver.implicitly_wait(1)
-        driver.find_element(By.NAME, 'Guia').send_keys(guia_numero)
-        driver.find_element(By.NAME, 'Periodo').send_keys(periodo)
+        driver.implicitly_wait(2)
+        
+        # Llenar el formulario
+        driver.find_element(By.NAME, 'Guia').send_keys(str(guia_numero))
+        driver.find_element(By.NAME, 'Periodo').send_keys(str(periodo))
         driver.find_element(By.NAME, 'Busqueda').click()
-        time.sleep(1)
+        
+        # Esperar a que cargue la página de resultados
+        time.sleep(2)
+        
+        # Imprimir a PDF (esto debería descargar directamente a la carpeta configurada)
         driver.execute_script('window.print();')
-        renombrar_pdf(descargas_dir, guia_numero)
+        
+        # Esperar a que se complete la descarga y renombrar
+        esperar_descarga_y_renombrar(descargas_dir, guia_numero)
+        
     except Exception as e:
         print(f"Error procesando guía {guia_numero}: {e}")
     finally:
@@ -94,22 +158,38 @@ def iniciar_proceso():
 
 
 def procesar_guias(archivo_excel):
-    lista_guias = obtener_guias_y_periodos(archivo_excel)
-    total_guias = len(lista_guias)
-    descargas_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'busquedas')
-    os.makedirs(descargas_dir, exist_ok=True)
+    try:
+        lista_guias = obtener_guias_y_periodos(archivo_excel)
+        total_guias = len(lista_guias)
+        
+        # Crear la carpeta 'busquedas' en el mismo directorio que el script
+        descargas_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'busquedas')
+        os.makedirs(descargas_dir, exist_ok=True)
+        
+        print(f"Los archivos se guardarán en: {descargas_dir}")
 
-    for index, (guia, periodo) in enumerate(lista_guias, 1):
-        procesar_guia(guia, periodo, descargas_dir)
-        progreso['value'] = (index / total_guias) * 100
-        estado.set(f"Procesando guía {index}/{total_guias}")
-        ventana.update_idletasks()
+        for index, (guia, periodo) in enumerate(lista_guias, 1):
+            estado.set(f"Procesando guía {index}/{total_guias}: {guia}")
+            ventana.update_idletasks()
+            
+            procesar_guia(guia, periodo, descargas_dir)
+            
+            progreso['value'] = (index / total_guias) * 100
+            ventana.update_idletasks()
+            
+            # Pequeña pausa entre descargas para evitar sobrecargar el servidor
+            time.sleep(1)
 
-    estado.set("Proceso completado.")
-    messagebox.showinfo("Completado", "Todos los resultados de búsqueda se han guardado correctamente.")
-    abrir_carpeta_busquedas(descargas_dir)
-    boton_iniciar.config(state=tk.NORMAL)
-    boton_buscar.config(state=tk.NORMAL)
+        estado.set("Proceso completado.")
+        messagebox.showinfo("Completado", f"Todos los resultados de búsqueda se han guardado en:\n{descargas_dir}")
+        abrir_carpeta_busquedas(descargas_dir)
+        
+    except Exception as e:
+        messagebox.showerror("Error", f"Ocurrió un error durante el proceso: {str(e)}")
+        estado.set("Error en el proceso.")
+    finally:
+        boton_iniciar.config(state=tk.NORMAL)
+        boton_buscar.config(state=tk.NORMAL)
 
 
 # Interfaz gráfica mejorada
