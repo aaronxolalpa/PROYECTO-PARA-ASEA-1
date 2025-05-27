@@ -10,6 +10,9 @@ import pandas as pd
 import threading
 import subprocess
 import platform
+import shutil
+import sys
+
 
 
 def seleccionar_archivo():
@@ -29,104 +32,40 @@ def obtener_guias_y_periodos(archivo):
 
 def configurar_navegador(descargas_dir):
     chrome_options = webdriver.ChromeOptions()
-    
-    # Configurar la carpeta de descargas directamente a la carpeta 'busquedas'
     prefs = {
-        "download.default_directory": descargas_dir,
-        "download.prompt_for_download": False,
-        "download.directory_upgrade": True,
-        "safebrowsing.enabled": True,
-        "printing.print_preview_sticky_settings.appState": '{"recentDestinations":[{"id":"Save as PDF","origin":"local","account":""}],"selectedDestinationId":"Save as PDF","version":2}',
-        "printing.default_destination_selection_rules": '{"kind":"local","name":"Save as PDF"}',
         "savefile.default_directory": descargas_dir,
         "savefile.prompt_for_download": False,
-        "profile.default_content_settings.popups": 0,
-        "profile.default_content_setting_values.automatic_downloads": 1
+        "printing.print_preview_sticky_settings.appState": '{"recentDestinations":[{"id":"Save as PDF","origin":"local","account":""}],"selectedDestinationId":"Save as PDF","version":2}',
+        "printing.default_destination_selection_rules": '{"kind":"local","name":"Save as PDF"}'
     }
     chrome_options.add_experimental_option("prefs", prefs)
     chrome_options.add_argument('--kiosk-printing')
-    chrome_options.add_argument('--disable-extensions')
-    chrome_options.add_argument('--disable-plugins')
-    chrome_options.add_argument('--no-sandbox')
-    chrome_options.add_argument('--disable-dev-shm-usage')
-    
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=chrome_options)
 
 
-def esperar_descarga_y_renombrar(descargas_dir, guia_numero, timeout=30):
-    """Espera a que se complete la descarga y renombra el archivo"""
-    tiempo_inicial = time.time()
-    archivo_temporal = None
-    
-    while time.time() - tiempo_inicial < timeout:
-        archivos = os.listdir(descargas_dir)
-        
-        # Buscar archivos .crdownload (descarga en progreso)
-        archivos_descargando = [f for f in archivos if f.endswith('.crdownload')]
-        if archivos_descargando:
-            time.sleep(1)
-            continue
-        
-        # Buscar el archivo PDF recién descargado
-        archivos_pdf = [f for f in archivos if f.endswith('.pdf')]
-        
-        # Buscar archivos que contengan palabras clave del seguimiento
-        for archivo in archivos_pdf:
-            if any(palabra in archivo.lower() for palabra in ['seguimiento', 'tracking', 'sepomex', 'correos']):
-                # Verificar que no sea uno de nuestros archivos ya renombrados
-                if not archivo.replace('.pdf', '').isdigit():
-                    archivo_temporal = archivo
-                    break
-        
-        if archivo_temporal:
-            break
-        
-        time.sleep(1)
-    
-    # Renombrar el archivo si se encontró
-    if archivo_temporal:
-        try:
-            origen = os.path.join(descargas_dir, archivo_temporal)
+def renombrar_pdf(descargas_dir, guia_numero):
+    time.sleep(5)
+    for archivo in os.listdir(descargas_dir):
+        if archivo.endswith(".pdf") and "Seguimiento" in archivo:
+            origen = os.path.join(descargas_dir, archivo)
             destino = os.path.join(descargas_dir, f"{guia_numero}.pdf")
-            
-            # Si ya existe un archivo con ese nombre, eliminarlo
-            if os.path.exists(destino):
-                os.remove(destino)
-            
             os.rename(origen, destino)
-            print(f"Archivo renombrado: {archivo_temporal} -> {guia_numero}.pdf")
-            return True
-        except Exception as e:
-            print(f"Error al renombrar archivo para guía {guia_numero}: {e}")
-            return False
-    else:
-        print(f"No se pudo encontrar el archivo descargado para la guía {guia_numero}")
-        return False
+            break
 
 
 def procesar_guia(guia_numero, periodo, descargas_dir):
     driver = configurar_navegador(descargas_dir)
     url = 'https://www.correosdemexico.gob.mx/SSLServicios/SeguimientoEnvio/Seguimiento.aspx'
-    
     try:
         driver.get(url)
-        driver.implicitly_wait(2)
-        
-        # Llenar el formulario
-        driver.find_element(By.NAME, 'Guia').send_keys(str(guia_numero))
-        driver.find_element(By.NAME, 'Periodo').send_keys(str(periodo))
+        driver.implicitly_wait(1)
+        driver.find_element(By.NAME, 'Guia').send_keys(guia_numero)
+        driver.find_element(By.NAME, 'Periodo').send_keys(periodo)
         driver.find_element(By.NAME, 'Busqueda').click()
-        
-        # Esperar a que cargue la página de resultados
-        time.sleep(2)
-        
-        # Imprimir a PDF (esto debería descargar directamente a la carpeta configurada)
+        time.sleep(1)
         driver.execute_script('window.print();')
-        
-        # Esperar a que se complete la descarga y renombrar
-        esperar_descarga_y_renombrar(descargas_dir, guia_numero)
-        
+        renombrar_pdf(descargas_dir, guia_numero)
     except Exception as e:
         print(f"Error procesando guía {guia_numero}: {e}")
     finally:
@@ -156,40 +95,60 @@ def iniciar_proceso():
 
     threading.Thread(target=procesar_guias, args=(archivo_excel,), daemon=True).start()
 
+def obtener_ruta_base():
+    if getattr(sys, 'frozen', False):
+        # Si está congelado (ejecutable .exe)
+        return os.path.dirname(sys.executable)
+    else:
+        # Si es un script .py
+        return os.path.dirname(os.path.realpath(__file__))
+
 
 def procesar_guias(archivo_excel):
-    try:
-        lista_guias = obtener_guias_y_periodos(archivo_excel)
-        total_guias = len(lista_guias)
-        
-        # Crear la carpeta 'busquedas' en el mismo directorio que el script
-        descargas_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'busquedas')
-        os.makedirs(descargas_dir, exist_ok=True)
-        
-        print(f"Los archivos se guardarán en: {descargas_dir}")
+    lista_guias = obtener_guias_y_periodos(archivo_excel)
+    total_guias = len(lista_guias)
 
-        for index, (guia, periodo) in enumerate(lista_guias, 1):
-            estado.set(f"Procesando guía {index}/{total_guias}: {guia}")
-            ventana.update_idletasks()
-            
-            procesar_guia(guia, periodo, descargas_dir)
-            
-            progreso['value'] = (index / total_guias) * 100
-            ventana.update_idletasks()
-            
-            # Pequeña pausa entre descargas para evitar sobrecargar el servidor
-            time.sleep(1)
+    # Obtener ruta base del .py o .exe
+    ruta_base = obtener_ruta_base()
 
-        estado.set("Proceso completado.")
-        messagebox.showinfo("Completado", f"Todos los resultados de búsqueda se han guardado en:\n{descargas_dir}")
-        abrir_carpeta_busquedas(descargas_dir)
-        
-    except Exception as e:
-        messagebox.showerror("Error", f"Ocurrió un error durante el proceso: {str(e)}")
-        estado.set("Error en el proceso.")
-    finally:
-        boton_iniciar.config(state=tk.NORMAL)
-        boton_buscar.config(state=tk.NORMAL)
+    #Crear carpeta  donde se guardarán los PDFs
+    carpeta = os.path.join(ruta_base, 'Busquedas')
+    if os.path.exists(carpeta):
+        shutil.rmtree(carpeta)
+    os.makedirs(carpeta)
+
+    # Procesar cada guía
+    for index, (guia, periodo) in enumerate(lista_guias, 1):
+        procesar_guia(guia, periodo, carpeta)
+        progreso['value'] = (index / total_guias) * 100
+        estado.set(f"Procesando guía {index}/{total_guias}")
+        ventana.update_idletasks()
+
+    # Mostrar mensaje y abrir carpeta de resultados
+    estado.set("Proceso completado.")
+    messagebox.showinfo("Completado", "Todos los resultados se copiaron correctamente.")
+    abrir_carpeta_busquedas(carpeta)
+
+    #Reactivar botones
+    boton_iniciar.config(state=tk.NORMAL)
+    boton_buscar.config(state=tk.NORMAL)
+def verificar_busquedas_al_inicio():
+    ruta_base = obtener_ruta_base()
+    carpeta = os.path.join(ruta_base, 'Busquedas')
+
+    if os.path.exists(carpeta):
+        archivos = os.listdir(carpeta)
+        if archivos:
+            respuesta = messagebox.askyesno(
+                "Archivos encontrados",
+                f"Se encontraron {len(archivos)} archivo(s) en la carpeta 'Busquedas'.\n¿Deseas eliminarlos?"
+            )
+            if respuesta:
+                try:
+                    shutil.rmtree(carpeta)
+                    os.makedirs(carpeta)
+                except Exception as e:
+                    messagebox.showerror("Error", f"No se pudo borrar la carpeta:\n{e}")
 
 
 # Interfaz gráfica mejorada
@@ -218,5 +177,5 @@ progreso.grid(row=3, column=0, columnspan=2, pady=10)
 estado = tk.StringVar()
 estado.set("Esperando...")
 tk.Label(frame, textvariable=estado, font=("Arial", 10, "italic")).grid(row=4, column=0, columnspan=2)
-
+verificar_busquedas_al_inicio()
 ventana.mainloop()
